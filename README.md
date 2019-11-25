@@ -1,7 +1,11 @@
-OCR_sample
+# PhoPyPe
 
-カメラを使ってリアルから文字列をコピペするマッシュルームアプリ……を作ろうかと思ったけどオンデバイスのOCRだと厳しさを感じたのでcamera2+MLKitサンプルということにしたもの
+photographically copy and paste
 
-<img alt="様子" src="https://raw.githubusercontent.com/wiki/suihan74/OCR_sample/images/screenshot_1.png" width="270"/>
+カメラを使ってリアルから文字列をコピペするマッシュルームアプリ。
 
-フォントの英数字なら割といける
+実用性はアレなのでcamera2+MLKitサンプルということにしたもの
+
+<img alt="様子" src="https://raw.githubusercontent.com/wiki/suihan74/OCR_sample/images/screenshot_2.png" width="270"/>
+
+検出した文字列から必要な部分を選択して、マッシュルーム機能で入力中のテキストに挿入する
