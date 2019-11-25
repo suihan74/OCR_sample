@@ -2,19 +2,20 @@ package com.suihan74.phopype
 
 import android.Manifest
 import android.content.Context
+import android.content.Intent
 import android.content.pm.PackageManager
 import android.graphics.Bitmap
+import android.graphics.ImageFormat
+import android.graphics.Point
 import android.graphics.SurfaceTexture
-import android.hardware.camera2.CameraCaptureSession
-import android.hardware.camera2.CameraDevice
-import android.hardware.camera2.CameraManager
-import android.hardware.camera2.CaptureRequest
+import android.hardware.camera2.*
+import android.media.Image
+import android.media.ImageReader
 import androidx.appcompat.app.AppCompatActivity
 import android.os.Bundle
+import android.util.Log
 import android.view.*
-import android.widget.Button
-import android.widget.LinearLayout
-import android.widget.TextView
+import android.widget.ImageButton
 import androidx.core.content.ContextCompat
 import com.google.android.gms.tasks.Task
 import com.google.firebase.FirebaseApp
@@ -25,6 +26,11 @@ import kotlinx.coroutines.*
 import kotlin.coroutines.CoroutineContext
 
 class MainActivity : AppCompatActivity(), CoroutineScope {
+
+    private enum class State {
+        PREVIEWING,
+        CAPTURED
+    }
 
     // coroutine
 
@@ -52,8 +58,7 @@ class MainActivity : AppCompatActivity(), CoroutineScope {
 
     private var captureSession: CameraCaptureSession? = null
 
-    /** 撮影・固定されたビットマップ */
-    private var capturedBitmap: Bitmap? = null
+    private var cameraState = State.PREVIEWING
 
     // camera over
 
@@ -64,19 +69,14 @@ class MainActivity : AppCompatActivity(), CoroutineScope {
 
     private val textureView: TextureView by lazy { findViewById<TextureView>(R.id.texture_view) }
 
-    private val topLine: View by lazy { findViewById<View>(R.id.top_line) }
+    private val detectButton: ImageButton by lazy { findViewById<ImageButton>(R.id.detect_button) }
 
-    private val bottomLine: View by lazy { findViewById<View>(R.id.bottom_line) }
-
-    private val topIgnoredArea: LinearLayout by lazy { findViewById<LinearLayout>(R.id.top_ignored_area) }
-
-    private val bottomIgnoredArea: LinearLayout by lazy { findViewById<LinearLayout>(R.id.bottom_ignored_area) }
-
-    private val detectButton: Button by lazy { findViewById<Button>(R.id.detect_button) }
-
-    private val detectedTextView: TextView by lazy { findViewById<TextView>(R.id.detected_text_view) }
+    private val doneButton: ImageButton by lazy { findViewById<ImageButton>(R.id.done_button) }
 
     private val overlayLayer: OverlayLayer by lazy { findViewById<OverlayLayer>(R.id.overlay_layer) }
+
+    private fun getLayoutSize() =
+        Point(rootLayout.width, rootLayout.height)
 
     // views over
 
@@ -103,79 +103,28 @@ class MainActivity : AppCompatActivity(), CoroutineScope {
 
         FirebaseApp.initializeApp(this)
 
-        /*
-        // 有効領域を初期化
-        topIgnoredArea.setPadding(0, 200, 0, 0)
-        bottomIgnoredArea.setPadding(0, 0, 0, 400)
-
-        // 上下バーを移動で有効領域を調整
-        topLine.apply {
-            var previousY = 0f
-            var previousPadding = 0
-            setOnTouchListener { _, event -> when(event.action) {
-                MotionEvent.ACTION_DOWN -> {
-                    previousY = event.y
-                    previousPadding = topIgnoredArea.paddingTop
-                    true
-                }
-
-                MotionEvent.ACTION_UP -> {
-                    previousY = 0f
-                    true
-                }
-
-                MotionEvent.ACTION_MOVE -> {
-                    val diff = (event.y - previousY).toInt()
-                    val updated = previousPadding + diff
-                    if (diff < 0 && updated >= 100 || updated + MINIMUM_VALID_HEIGHT < bottomIgnoredArea.y) {
-                        topIgnoredArea.updatePadding(top = updated)
-                        true
-                    }
-                    else false
-                }
-
-                else -> false
-            }}
-        }
-
-        bottomLine.apply {
-            var previousY = 0f
-            var previousPadding = 0
-            setOnTouchListener { _, event -> when(event.action) {
-                MotionEvent.ACTION_DOWN -> {
-                    previousY = event.y
-                    previousPadding = bottomIgnoredArea.paddingBottom
-                    true
-                }
-
-                MotionEvent.ACTION_UP -> {
-                    previousY = 0f
-                    true
-                }
-
-                MotionEvent.ACTION_MOVE -> {
-                    val diff = (event.y - previousY).toInt()
-                    val updated = previousPadding + diff
-                    if (diff > 0 && updated >= 100 || rootView.height - topIgnoredArea.height - updated > MINIMUM_VALID_HEIGHT) {
-                        bottomIgnoredArea.updatePadding(bottom = updated)
-                        true
-                    }
-                    else false
-                }
-
-                else -> false
-            }}
-        }
-         */
-
         detectButton.setOnClickListener {
-//            detect()
-            capturedBitmap =
-                if (capturedBitmap == null) textureView.bitmap
-                else null
+            when (cameraState) {
+                State.PREVIEWING ->
+                    startCapture()
 
-            if (capturedBitmap != null) {
-                detect(capturedBitmap)
+                State.CAPTURED ->
+                    startPreview()
+            }
+        }
+
+        doneButton.apply {
+            visibility = View.GONE
+            setOnClickListener {
+                // 選択した文字列を入力メソッドに返す
+                val result = overlayLayer.selected.filterIsInstance<DetectedTextLayer>()
+                    .joinToString(separator = "\n") { it.data.text }
+
+                val intent = Intent().apply {
+                    putExtra("replace_key", result)
+                }
+                setResult(RESULT_OK, intent)
+                finish()
             }
         }
     }
@@ -194,9 +143,7 @@ class MainActivity : AppCompatActivity(), CoroutineScope {
 
                 override fun onSurfaceTextureSizeChanged(texture: SurfaceTexture?, p1: Int, p2: Int) {}
                 override fun onSurfaceTextureUpdated(texture: SurfaceTexture?) {
-                    if (capturedBitmap == null) {
-                        detect()
-                    }
+                    detect()
                 }
                 override fun onSurfaceTextureDestroyed(texture: SurfaceTexture?): Boolean = true
             }
@@ -224,8 +171,9 @@ class MainActivity : AppCompatActivity(), CoroutineScope {
             return
         }
 
+        val displaySize = getLayoutSize()
         val surface = Surface(textureView.surfaceTexture.apply {
-            setDefaultBufferSize(640, 480)
+            setDefaultBufferSize(displaySize.x, displaySize.y)
         })
 
         val previewRequestBuilder = cameraDevice!!.createCaptureRequest(CameraDevice.TEMPLATE_PREVIEW).apply {
@@ -246,28 +194,20 @@ class MainActivity : AppCompatActivity(), CoroutineScope {
 
     var task: Task<FirebaseVisionText>? = null
 
-    private fun detect(capturedBitmap: Bitmap? = null) {
+    private fun detect(image: FirebaseVisionImage) {
         if (task != null && task?.isCanceled != true && task?.isComplete != true) {
             return
         }
 
-//        val (validY, validHeight) = validArea
-//        val width = rootLayout.width
-//            val bitmap = Bitmap.createBitmap(textureView.bitmap, 0, validY, width, validHeight)
-        overlayLayer.clear()
-
-        val bitmap = capturedBitmap ?: textureView.bitmap
-        if (capturedBitmap != null) {
-            overlayLayer.add(BitmapLayer(bitmap))
-        }
-
-        val image = FirebaseVisionImage.fromBitmap(bitmap)
         val detector = FirebaseVision.getInstance().onDeviceTextRecognizer
         task = detector.processImage(image)
             .addOnSuccessListener { result ->
+                overlayLayer.clear()
                 result.textBlocks
                     .forEach {
-                        overlayLayer.add(DetectedTextLayer(it))
+                        it.lines.forEach { line ->
+                            overlayLayer.add(DetectedTextLayer(this, line))
+                        }
                     }
                 overlayLayer.invalidate()
                 detector.close()
@@ -278,10 +218,92 @@ class MainActivity : AppCompatActivity(), CoroutineScope {
             }
     }
 
-    private val validArea: Pair<Int, Int> get() {
-        val y = topIgnoredArea.height
-        val rootHeight = rootLayout.height
-        val height = rootHeight - y - bottomIgnoredArea.height
-        return y to height
+    private fun detect(capturedBitmap: Bitmap? = null) {
+        val bitmap = capturedBitmap ?: textureView.bitmap
+        val image = FirebaseVisionImage.fromBitmap(bitmap)
+        detect(image)
+    }
+
+    private fun detect(capturedImage: Image) {
+        val image = FirebaseVisionImage.fromMediaImage(capturedImage, 0)
+        detect(image)
+    }
+
+    private fun createCameraCaptureSession() {
+        if (cameraDevice == null) {
+            return
+        }
+
+        val displaySize = getLayoutSize()
+        val surface = Surface(textureView.surfaceTexture.apply {
+            setDefaultBufferSize(displaySize.x, displaySize.y)
+        })
+
+        val imageReader = ImageReader.newInstance(
+            displaySize.x,
+            displaySize.y,
+            ImageFormat.JPEG,
+            2)
+            .apply {
+                setOnImageAvailableListener({ image ->
+                    Log.d("message", "gotcha!")
+                    image.close()
+                }, null)
+            }
+        val surfaces = listOf(surface, imageReader.surface)
+
+        val captureRequestBuilder = cameraDevice!!.createCaptureRequest(CameraDevice.TEMPLATE_STILL_CAPTURE).apply {
+            addTarget(imageReader.surface)
+            set(CaptureRequest.CONTROL_AF_MODE, CaptureRequest.CONTROL_AF_MODE_CONTINUOUS_PICTURE)
+            set(CaptureRequest.CONTROL_AE_MODE, CaptureRequest.CONTROL_AE_MODE_ON)
+//            set(CaptureRequest.FLASH_MODE, CaptureRequest.FLASH_MODE_TORCH)
+        }
+
+        cameraDevice?.createCaptureSession(surfaces, object : CameraCaptureSession.StateCallback() {
+            override fun onConfigured(session: CameraCaptureSession) {
+                captureSession = session
+                val request = captureRequestBuilder.build()
+
+                captureSession?.capture(request, object : CameraCaptureSession.CaptureCallback() {
+                    override fun onCaptureCompleted(
+                        session: CameraCaptureSession,
+                        request: CaptureRequest,
+                        result: TotalCaptureResult
+                    ) {
+                        super.onCaptureCompleted(session, request, result)
+                        captureSession = null
+                    }
+
+                    override fun onCaptureFailed(
+                        session: CameraCaptureSession,
+                        request: CaptureRequest,
+                        failure: CaptureFailure
+                    ) {
+                        super.onCaptureFailed(session, request, failure)
+                        captureSession = null
+                    }
+                }, null)
+            }
+
+            override fun onConfigureFailed(session: CameraCaptureSession) {}
+        }, null)
+
+    }
+
+    private fun startCapture() {
+        cameraState = State.CAPTURED
+        captureSession?.stopRepeating()
+        overlayLayer.clear()
+        doneButton.visibility = View.VISIBLE
+
+        createCameraCaptureSession()
+    }
+
+    private fun startPreview() {
+        cameraState = State.PREVIEWING
+        overlayLayer.clear()
+        doneButton.visibility = View.GONE
+
+        createCameraPreviewSession()
     }
 }
